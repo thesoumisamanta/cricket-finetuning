@@ -13,25 +13,35 @@ import json
 
 # Configuration
 MODEL_NAME = "microsoft/Phi-3-mini-4k-instruct"
-OUTPUT_DIR = "./phi3-cricket-finetuned"
+OUTPUT_DIR = "./phi3-cricket-finetuned-v2"
 DATASET_PATH = "cricket_train_fixed.jsonl"
 
-# LoRA configuration for efficient fine-tuning
+# LoRA configuration - INCREASED for better learning
 lora_config = LoraConfig(
-    r=16,
-    lora_alpha=32,
-    target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
+    r=32,  # Increased from 16
+    lora_alpha=64,  # Increased from 32
+    target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],  # More modules
     lora_dropout=0.05,
     bias="none",
     task_type="CAUSAL_LM"
 )
 
 def format_prompt(instruction, input_text, output_text=None):
-    """Format the prompt for Phi-3"""
-    if output_text:
-        return f"<|user|>\n{instruction}\n{input_text}<|end|>\n<|assistant|>\n{output_text}<|end|>"
+    """
+    FIXED: Format prompt correctly without 'nan'
+    """
+    # Combine instruction and input properly
+    if input_text and input_text.strip() and input_text != "nan":
+        full_question = f"{instruction}\n{input_text}"
     else:
-        return f"<|user|>\n{instruction}\n{input_text}<|end|>\n<|assistant|>\n"
+        full_question = instruction
+    
+    if output_text:
+        # Training format - include the answer
+        return f"<|user|>\n{full_question}<|end|>\n<|assistant|>\n{output_text}<|end|>"
+    else:
+        # Inference format - no answer
+        return f"<|user|>\n{full_question}<|end|>\n<|assistant|>\n"
 
 def load_and_prepare_data():
     """Load JSONL dataset and prepare it"""
@@ -66,10 +76,10 @@ def main():
     
     # Check GPU
     if torch.cuda.is_available():
-        print(f"\nâœ“ GPU Available: {torch.cuda.get_device_name(0)}")
-        print(f"âœ“ GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.2f} GB")
+        print(f"\n✓ GPU Available: {torch.cuda.get_device_name(0)}")
+        print(f"✓ GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.2f} GB")
     else:
-        print("\nâœ— No GPU detected! Training will be slow.")
+        print("\n✗ No GPU detected! Training will be slow.")
         return
     
     # Load tokenizer
@@ -102,6 +112,20 @@ def main():
     dataset = load_and_prepare_data()
     print(f"Dataset size: {len(dataset)} examples")
     
+    # CRITICAL: Show examples of formatted data
+    print("\n" + "=" * 50)
+    print("Sample Training Examples:")
+    print("=" * 50)
+    for i in range(min(2, len(dataset))):
+        formatted = format_prompt(
+            dataset[i]['instruction'],
+            dataset[i]['input'],
+            dataset[i]['output']
+        )
+        print(f"\nExample {i+1}:")
+        print(formatted)
+    print("=" * 50)
+    
     # Tokenize dataset
     print("\nTokenizing dataset...")
     tokenized_dataset = dataset.map(
@@ -110,22 +134,23 @@ def main():
         remove_columns=dataset.column_names
     )
     
-    # Training arguments optimized for RTX 3050 (4GB VRAM)
+    # Training arguments - INCREASED epochs and learning rate
     training_args = TrainingArguments(
         output_dir=OUTPUT_DIR,
         per_device_train_batch_size=1,
         gradient_accumulation_steps=8,
-        num_train_epochs=3,
-        learning_rate=2e-4,
+        num_train_epochs=20,  # INCREASED from 3 to 20
+        learning_rate=5e-4,  # INCREASED from 2e-4
         fp16=True,
         logging_steps=2,
         save_strategy="epoch",
-        save_total_limit=1,
-        warmup_steps=5,
+        save_total_limit=2,
+        warmup_steps=10,
         optim="paged_adamw_8bit",
         gradient_checkpointing=True,
-        report_to="tensorboard",
+        report_to="none",  # Disable tensorboard
         max_grad_norm=0.3,
+        logging_dir=None,
     )
     
     # Data collator
@@ -145,7 +170,10 @@ def main():
     
     # Start training
     print("\n" + "=" * 50)
-    print("Starting training... This may take 30-60 minutes!")
+    print("Starting training...")
+    print(f"Total epochs: {training_args.num_train_epochs}")
+    print(f"Effective batch size: {training_args.per_device_train_batch_size * training_args.gradient_accumulation_steps}")
+    print(f"Total training steps: {len(tokenized_dataset) * training_args.num_train_epochs // (training_args.per_device_train_batch_size * training_args.gradient_accumulation_steps)}")
     print("=" * 50 + "\n")
     
     trainer.train()
@@ -155,7 +183,11 @@ def main():
     model.save_pretrained(OUTPUT_DIR)
     tokenizer.save_pretrained(OUTPUT_DIR)
     
-    print(f"\nâœ“ Fine-tuning complete! Model saved to {OUTPUT_DIR}")
+    print(f"\n✓ Fine-tuning complete! Model saved to {OUTPUT_DIR}")
+    print("\n" + "=" * 50)
+    print("IMPORTANT: Update app.py to use new model path:")
+    print(f"MODEL_PATH = './{OUTPUT_DIR}'")
+    print("=" * 50)
 
 if __name__ == "__main__":
     main()

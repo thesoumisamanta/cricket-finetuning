@@ -5,6 +5,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 from peft import PeftModel
 import traceback
 import os
+import re
 
 app = Flask(__name__)
 CORS(app)
@@ -17,7 +18,7 @@ def load_model():
     global model, tokenizer
     
     print("Loading fine-tuned model...")
-    MODEL_PATH = "./phi3-cricket-finetuned"
+    MODEL_PATH = "./phi3-cricket-finetuned-v2"
     BASE_MODEL = "microsoft/Phi-3-mini-4k-instruct"
     
     # Load tokenizer
@@ -61,31 +62,38 @@ def is_cricket_related(question):
 
 def generate_response(question, max_length=150, temperature=0.3):
     try:
-        # Handle greetings and casual conversation
+        # Handle greetings and casual conversation with WORD BOUNDARIES
         question_lower = question.lower().strip()
         
-        # Greetings
-        if any(greeting in question_lower for greeting in ['hi', 'hello', 'hey', 'greetings']):
-            return "Hi! I am your cricket assistant. Ask me anything about cricket rules, terms, players, or matches!"
+        # Greetings - use word boundaries to avoid false matches
+        greeting_pattern = r'\b(hi|hello|hey|greetings)\b'
+        if re.search(greeting_pattern, question_lower):
+            # But exclude if it's clearly a cricket question
+            if not is_cricket_related(question):
+                return "Hi! I am your cricket assistant. Ask me anything about cricket rules, terms, players, or matches!"
         
-        if any(phrase in question_lower for phrase in ['good morning', 'good afternoon', 'good evening']):
+        # Good morning/afternoon/evening
+        if re.search(r'\bgood (morning|afternoon|evening)\b', question_lower):
             return "Good day! I'm here to help you with cricket questions. What would you like to know about cricket?"
         
-        if any(phrase in question_lower for phrase in ['how are you', 'how do you do', 'whats up', "what's up"]):
+        # How are you - use word boundaries
+        if re.search(r'\bhow are you\b|\bhow do you do\b|\bwhats up\b|\bwhat\'s up\b', question_lower):
             return "I'm doing great, thank you! I'm ready to answer your cricket questions. What would you like to know?"
         
-        if any(phrase in question_lower for phrase in ['thank', 'thanks']):
+        # Thanks
+        if re.search(r'\bthank', question_lower) and not is_cricket_related(question):
             return "You're welcome! Feel free to ask more cricket questions anytime!"
         
-        if any(phrase in question_lower for phrase in ['bye', 'goodbye', 'see you']):
+        # Bye
+        if re.search(r'\bbye\b|\bgoodbye\b|\bsee you\b', question_lower):
             return "Goodbye! Come back if you have more cricket questions. Have a great day!"
         
         # Check if cricket-related
         if not is_cricket_related(question):
             return "I'm sorry, but I'm specialized in cricket only. I can answer questions about cricket rules, terms, players, matches, and formats. Please ask me something related to cricket!"
         
-        # === FIXED: Match training format exactly ===
-        prompt = f"<|user|>\n{question}\nnan<|end|>\n<|assistant|>\n"
+        # === FIXED: Remove 'nan' from prompt ===
+        prompt = f"<|user|>\n{question}<|end|>\n<|assistant|>\n"
         
         inputs = tokenizer(
             prompt, 
@@ -96,24 +104,22 @@ def generate_response(question, max_length=150, temperature=0.3):
         )
         inputs = {k: v.to(model.device) for k, v in inputs.items()}
         
-        # === FIXED: Compatibility for cache issue ===
         with torch.no_grad():
             outputs = model.generate(
                 **inputs,
                 max_new_tokens=max_length,
-                temperature=0.3,
+                temperature=0.7,  # Slightly higher for more diverse responses
                 do_sample=True,
-                top_p=0.85,
-                top_k=40,
+                top_p=0.9,
+                top_k=50,
                 pad_token_id=tokenizer.eos_token_id,
                 eos_token_id=tokenizer.eos_token_id,
-                use_cache=False,              # â† CRITICAL: Disable cache to avoid error
-                repetition_penalty=1.15,
+                use_cache=False,
+                repetition_penalty=1.2,  # Increased to reduce repetition
                 num_beams=1
-                # Removed early_stopping - not supported in sampling mode
             )
         
-        # === FIXED: Extract only generated tokens ===
+        # Extract only generated tokens
         generated_ids = outputs[0][inputs['input_ids'].shape[1]:]
         response = tokenizer.decode(generated_ids, skip_special_tokens=True)
         
@@ -147,7 +153,7 @@ def generate_response(question, max_length=150, temperature=0.3):
         response = response.lstrip(":. ")
         
         # Validate response quality
-        if not response or len(response) < 15:
+        if not response or len(response) < 10:
             response = "I understand your question is about cricket, but I need more context to answer accurately. Could you please rephrase or provide more details?"
         
         return response
@@ -156,6 +162,29 @@ def generate_response(question, max_length=150, temperature=0.3):
         print(f"Error in generate_response: {str(e)}")
         print(traceback.format_exc())
         return "I apologize, but I encountered an error processing your question. Please try asking again."
+
+
+def is_cricket_related(question):
+    """Check if question is cricket-related - EXPANDED"""
+    cricket_keywords = [
+        'cricket', 'bat', 'ball', 'wicket', 'over', 'run', 'boundary',
+        'bowler', 'batsman', 'fielder', 'stump', 'lbw', 'catch', 'innings',
+        'test', 'odi', 't20', 'player', 'team', 'match', 'pitch', 'six', 'four',
+        # Player names
+        'kohli', 'dhoni', 'tendulkar', 'rohit', 'bumrah', 'pujara', 'dravid',
+        'ganguly', 'sehwag', 'kapil', 'sachin', 'virat', 'ms', 'sharma',
+        'harbhajan', 'kumble', 'raina', 'yuvraj', 'pathan', 'zaheer', 'ishant', 
+        'jadeja', 'rahul', 'ishan', 'subhman', 'pant', 'gill', 'smriti', 'mandhana', 'deepa', 'shafali', 'harmanpreet',
+        'jhulan', 'sundar', 'shami', 'chahal', 'kuldeep',
+        # Venues
+        'wankhede', 'eden', 'kotla', 'chinnaswamy', 'chepauk',
+        # Awards and records
+        'century', 'double century', 'triple century', 'hat-trick', 'world cup',
+        'ipl', 'champions trophy', 'ashes', 'series'
+    ]
+    question_lower = question.lower()
+    return any(keyword in question_lower for keyword in cricket_keywords)
+
 
 @app.route('/')
 def home():
